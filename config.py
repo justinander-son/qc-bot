@@ -6,8 +6,8 @@ from pathlib import Path
 # ==============================================================================
 # 1. DIRECTORY SETTINGS
 # ==============================================================================
-SOURCE_DIR = Path('/Volumes/Matisse WF/03_Animator Dailies')
-APPROVED_DIR = Path('/Users/justin.anderson/Desktop/PyQCTestResults')
+SOURCE_DIR = Path('/Users/justin.anderson/Library/CloudStorage/Dropbox-59Productions/59--Working_Files-Video/Lightroom Matisse/03_Animator Dailies')
+APPROVED_DIR = Path('/Users/justin.anderson/Desktop/PyQCTestResults2')
 DATABASE_FILE = Path("qc_database.json")
 
 # Folders to completely ignore during the QC scan
@@ -18,7 +18,8 @@ EXCLUDED_DIRS = [
     "26-03-30", "26-03-31", "26-04-01", "26-04-02", "26-04-07", 
     "26-04-08", "26-04-09", "26-04-10", "26-04-13", "26-04-14", 
     "26-04-15", "26-04-16", "26-04-20", "26-04-21", "26-04-22", 
-    "26-04-23", "26-04-24", "26-04-26"
+    "26-04-23", "26-04-24", "26-04-26", "26-04-27", "26-04-28",
+    "26-04-29", "26-04-30", "26-05-01"
 ]
 
 def is_path_excluded(file_path):
@@ -82,7 +83,7 @@ def get_routing_path(filename, strict=True):
 # 3. QC PARAMETERS
 # ==============================================================================
 ALLOWED_RESOLUTIONS = [
-    "13584x1712", "6790x2259", "13584x4518", "8192x4320", 
+    "13584x1712", "6792x2260", "13584x4518", "8192x4320",
     "2318x1632", "4636x3264", "7972x3424", "5612x3424"
 ]
 ALLOWED_CODECS = ["h264", "prores", "mjpeg", "png"]
