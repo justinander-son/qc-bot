@@ -1,0 +1,85 @@
+project: matisse
+
+# ── Paths ─────────────────────────────────────────────────────────────────────
+# Set SOURCE_DIR and APPROVED_DIR in .env
+source_dir: ${SOURCE_DIR}
+approved_dir: ${APPROVED_DIR}
+
+# ── Filename convention ───────────────────────────────────────────────────────
+# Capture groups: shot, name, uv_area, res_name, version, frame (opt), ext
+filename_regex: '^(\d{3})_([A-Za-z0-9]+)_(T|All Walls|Brick|Floor|WallA|WallB|WallC|WallD)_(FullRes|HalfRes|QRes)_(v\d{6}[a-z]?)(?:_(\d+))?\.(mp4|jpg|png)$'
+
+# ── Allowed technical specs ───────────────────────────────────────────────────
+allowed_resolutions:
+  - "13584x1712"
+  - "6792x2260"
+  - "13584x4518"
+  - "8192x4320"
+  - "2318x1632"
+  - "4636x3264"
+  - "7972x3424"
+  - "5612x3424"
+
+allowed_codecs: [h264, prores, mjpeg, png]
+target_fps: "30/1"
+
+# ── Airtable integration ──────────────────────────────────────────────────────
+# Set AIRTABLE_BASE_ID, AIRTABLE_TABLE_ID, AIRTABLE_API_KEY in .env
+# All field names below must match your Airtable table exactly (case-sensitive).
+airtable:
+  base_id: ${AIRTABLE_BASE_ID}
+  table_id: ${AIRTABLE_TABLE_ID}
+
+  fields:
+    # The field the pipeline reads to find the file on disk
+    file_path: "Dailies File Path"
+
+    # The field the pipeline filters on to find work to do, and writes the result back to
+    qc_status: "QC Status"
+
+    # Written with newline-separated error messages on failure
+    qc_errors: "Justin Notes"
+
+    # Written with an ISO 8601 timestamp after each check
+    # qc_checked_at: "QC Checked At"
+
+    # Written with the pipeline version string (e.g. "2.0.0")
+    # Remove this line if the field doesn't exist in your table yet
+    # qc_version: "QC Version"
+
+  # Records with this value in qc_status are picked up for processing
+  pending_value: "Pending Review"
+
+  # What the pipeline writes back to qc_status for each outcome.
+  # Change these to match whatever values your Airtable expects
+  # (e.g. "Approved" / "Failed" / "Error")
+  status_values:
+    pass: "Approved"
+    fail: "Denied"
+    error: "In Progress"
+
+# ── QC sensitivity ────────────────────────────────────────────────────────────
+qc:
+  # Seconds at clip start/end that are exempt from black/freeze detection (fade tolerance)
+  content_fade_margin: 0.5
+
+  # Minimum duration of a black segment to flag as an error
+  black_sensitivity_duration: 0.03
+
+  # Fraction of pixels that must be below threshold to count a frame as black (0.0–1.0)
+  black_pixel_threshold: 0.10
+
+  # Fraction of frames in a segment that must be black to trigger the detector
+  black_picture_threshold: 0.98
+
+  # Minimum duration of a frozen segment to flag as an error
+  freeze_sensitivity_duration: 0.03
+
+  # Noise floor for freeze detection — frames with noise below this are considered frozen
+  freeze_noise_floor: "-60dB"
+
+  # EBU R128 target loudness in LUFS (-23.0 for broadcast, -16.0 for streaming)
+  loudness_target_lufs: -23.0
+
+  # Acceptable deviation from target in LU (±)
+  loudness_tolerance_lu: 1.0

@@ -1,28 +1,23 @@
+from __future__ import annotations
+
+import re
 import subprocess
 import json
 from pathlib import Path
-import config
 
-
-def check_filename(filename: str) -> tuple[bool, str]:
-    """Checks if the filename matches the required convention using the centralized parser."""
-    meta = config.parse_metadata(filename)
-    if not meta:
-        return False, f"Filename '{filename}' does not match naming convention or contains invalid suffixes."
-    return True, "Passed"
+from checkers.base import BaseChecker, CheckFinding
+from core.registry import register
 
 
 def get_ffprobe_data(file_path: str) -> dict:
-    """Runs ffprobe and returns the metadata as a JSON dictionary."""
     command = [
         "ffprobe",
         "-v", "quiet",
         "-print_format", "json",
         "-show_format",
         "-show_streams",
-        file_path
+        file_path,
     ]
-
     try:
         result = subprocess.run(command, capture_output=True, text=True, check=True)
         return json.loads(result.stdout)
@@ -30,63 +25,94 @@ def get_ffprobe_data(file_path: str) -> dict:
         return {"error": f"ffprobe failed: {e}"}
 
 
-def run_metadata_qc(file_path: Path) -> tuple[bool, list[str], list[str], str, str]:
-    """
-    Runs all Phase 1 checks.
-    """
-    errors = []
-    warnings = []
-    file_name = file_path.name
+@register("metadata")
+class MetadataChecker(BaseChecker):
+    def run(self, file_path: Path) -> list[CheckFinding]:
+        findings: list[CheckFinding] = []
+        filename = file_path.name
 
-    # 1. Filename Check
-    valid_name, name_msg = check_filename(file_name)
-    if not valid_name:
-        errors.append(name_msg)
+        if not re.match(self._config.filename_regex, filename):
+            findings.append(self._finding(
+                passed=False,
+                severity="error",
+                message=f"Filename '{filename}' does not match naming convention.",
+            ))
+        else:
+            findings.append(self._finding(passed=True, severity="info", message="Filename matches convention."))
 
-    # 2. Extract Metadata
-    probe_data = get_ffprobe_data(str(file_path))
-    if "error" in probe_data:
-        errors.append(probe_data["error"])
-        return False, errors, warnings, "0.0", "Unknown"
+        probe_data = get_ffprobe_data(str(file_path))
+        if "error" in probe_data:
+            findings.append(self._finding(passed=False, severity="error", message=probe_data["error"]))
+            return findings
 
-    video_stream = next((s for s in probe_data.get("streams", []) if s.get("codec_type") == "video"), None)
-    audio_stream = next((s for s in probe_data.get("streams", []) if s.get("codec_type") == "audio"), None)
+        streams = probe_data.get("streams", [])
+        video_stream = next((s for s in streams if s.get("codec_type") == "video"), None)
+        audio_stream = next((s for s in streams if s.get("codec_type") == "audio"), None)
 
-    if not video_stream:
-        errors.append("No video stream found in file.")
-        return False, errors, warnings, "0.0", "Unknown"
+        if not video_stream:
+            findings.append(self._finding(passed=False, severity="error", message="No video stream found in file."))
+            return findings
 
-    # 3. Resolution Info
-    width = video_stream.get("width")
-    height = video_stream.get("height")
-    actual_resolution = f"{width}x{height}"
+        width = video_stream.get("width")
+        height = video_stream.get("height")
+        actual_resolution = f"{width}x{height}"
+        codec = video_stream.get("codec_name", "")
+        format_info = probe_data.get("format", {})
+        duration = format_info.get("duration", "0.0")
 
-    # 4. Codec Check
-    codec = video_stream.get("codec_name", "")
-    if codec not in config.ALLOWED_CODECS:
-        errors.append(f"Codec '{codec}' is not allowed: {config.ALLOWED_CODECS}")
+        if codec not in self._config.allowed_codecs:
+            findings.append(self._finding(
+                passed=False, severity="error",
+                message=f"Codec '{codec}' is not allowed: {self._config.allowed_codecs}",
+                details={"codec": codec, "allowed_codecs": self._config.allowed_codecs},
+            ))
+        else:
+            findings.append(self._finding(
+                passed=True, severity="info",
+                message=f"Codec '{codec}' is allowed.",
+                details={"codec": codec},
+            ))
 
-    # 5. Resolution Check
-    if actual_resolution not in config.ALLOWED_RESOLUTIONS:
-        errors.append(f"Resolution '{actual_resolution}' is not allowed: {config.ALLOWED_RESOLUTIONS}")
+        if actual_resolution not in self._config.allowed_resolutions:
+            findings.append(self._finding(
+                passed=False, severity="error",
+                message=f"Resolution '{actual_resolution}' is not in allowed list.",
+                details={"actual_res": actual_resolution, "allowed_resolutions": self._config.allowed_resolutions},
+            ))
+        else:
+            findings.append(self._finding(
+                passed=True, severity="info",
+                message=f"Resolution '{actual_resolution}' is allowed.",
+                details={"actual_res": actual_resolution},
+            ))
 
-    # 6. Type-Specific Checks (Images vs Videos)
-    is_image = file_name.lower().endswith((".jpg", ".png")) or codec in ["mjpeg", "png"]
-    
-    if is_image:
-        # Images don't have framerate or audio requirements
-        pass
-    else:
-        fps = video_stream.get("r_frame_rate")
-        if fps != config.TARGET_FPS:
-            errors.append(f"Framerate '{fps}' does not match target '{config.TARGET_FPS}'.")
+        is_image = filename.lower().endswith((".jpg", ".png")) or codec in ["mjpeg", "png"]
+        if not is_image:
+            fps = video_stream.get("r_frame_rate")
+            if fps != self._config.target_fps:
+                findings.append(self._finding(
+                    passed=False, severity="error",
+                    message=f"Framerate '{fps}' does not match target '{self._config.target_fps}'.",
+                    details={"fps": fps, "target_fps": self._config.target_fps, "duration": duration, "actual_res": actual_resolution},
+                ))
+            else:
+                findings.append(self._finding(
+                    passed=True, severity="info",
+                    message=f"Framerate '{fps}' matches target.",
+                    details={"fps": fps, "duration": duration, "actual_res": actual_resolution},
+                ))
 
-        if not audio_stream:
-            warnings.append("No audio stream found.")
+            if not audio_stream:
+                findings.append(self._finding(
+                    passed=True, severity="warning",
+                    message="No audio stream found.",
+                    details={"duration": duration, "actual_res": actual_resolution},
+                ))
+        else:
+            findings.append(self._finding(
+                passed=True, severity="info",
+                message="Image file; framerate and audio checks skipped.",
+                details={"duration": duration, "actual_res": actual_resolution},
+            ))
 
-    # 7. Duration
-    format_info = probe_data.get("format", {})
-    duration = format_info.get("duration", "0.0")
-
-    passed = len(errors) == 0
-    return passed, errors, warnings, duration, actual_resolution
+        return findings

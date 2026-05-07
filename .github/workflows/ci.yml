@@ -1,0 +1,36 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.9
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
+
+      - name: Install ffmpeg
+        run: sudo apt-get update -qq && sudo apt-get install -y ffmpeg
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt pytest pytest-cov
+
+      - name: Run tests
+        env:
+          SOURCE_DIR: /tmp/test_source
+          APPROVED_DIR: /tmp/test_approved
+          QC_PROJECT: matisse
+        run: |
+          mkdir -p /tmp/test_source /tmp/test_approved
+          pytest tests/ -v --tb=short \
+            --cov=core --cov=checkers --cov=integrations \
+            --cov-report=term-missing

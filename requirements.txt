@@ -1,3 +1,10 @@
-rich
+# System dependencies (install separately): ffmpeg, ffprobe
+# See: https://ffmpeg.org/download.html
 streamlit
 pandas
+sqlalchemy>=2.0
+python-dotenv
+pyyaml
+pyairtable
+pytest
+pytest-cov
