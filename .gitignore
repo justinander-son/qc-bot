@@ -35,6 +35,9 @@ ENV/
 *.swp
 *.swo
 
+# Claude
+CLAUDE.md
+
 # Project Specific
 qc_database.json
 QC_Report.txt
