@@ -33,8 +33,6 @@ def test_load_config_missing_required_env_var(tmp_path, monkeypatch):
           black_picture_threshold: 0.98
           freeze_sensitivity_duration: 0.03
           freeze_noise_floor: "-60dB"
-          loudness_target_lufs: -23.0
-          loudness_tolerance_lu: 1.0
     """))
     monkeypatch.delenv("DEFINITELY_NOT_SET_XYZ", raising=False)
     # Patch _PROJECT_ROOT so load_config finds our temp projects/ dir
@@ -62,8 +60,6 @@ def test_airtable_section_optional(tmp_path, monkeypatch):
           black_picture_threshold: 0.98
           freeze_sensitivity_duration: 0.03
           freeze_noise_floor: "-60dB"
-          loudness_target_lufs: -23.0
-          loudness_tolerance_lu: 1.0
     """))
     monkeypatch.delenv("AIRTABLE_API_KEY", raising=False)
     import core.config as cfg_mod

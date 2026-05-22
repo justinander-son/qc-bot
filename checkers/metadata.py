@@ -9,6 +9,18 @@ from checkers.base import BaseChecker, CheckFinding
 from core.registry import register
 
 
+def _duration_to_frames(duration: str, fps: str) -> int:
+    """Convert a duration in seconds and an fps fraction string (e.g. '30/1') to a frame count."""
+    try:
+        secs = float(duration)
+        if "/" in fps:
+            num, den = fps.split("/", 1)
+            return max(1, round(secs * int(num) / int(den)))
+        return max(1, round(secs * float(fps)))
+    except (ValueError, ZeroDivisionError, AttributeError):
+        return 0
+
+
 def get_ffprobe_data(file_path: str) -> dict:
     command = [
         "ffprobe",
@@ -59,6 +71,8 @@ class MetadataChecker(BaseChecker):
         codec = video_stream.get("codec_name", "")
         format_info = probe_data.get("format", {})
         duration = format_info.get("duration", "0.0")
+        bitrate_bps = int(format_info.get("bit_rate", 0) or 0)
+        bitrate_mbps = round(bitrate_bps / 1_000_000, 2) if bitrate_bps > 0 else None
 
         if codec not in self._config.allowed_codecs:
             findings.append(self._finding(
@@ -87,32 +101,53 @@ class MetadataChecker(BaseChecker):
             ))
 
         is_image = filename.lower().endswith((".jpg", ".png")) or codec in ["mjpeg", "png"]
+
+        if is_image:
+            frame_count = 1
+        else:
+            fps_str = video_stream.get("r_frame_rate", "")
+            frame_count = _duration_to_frames(duration, fps_str)
+
+        base_details = {
+            "duration": duration,
+            "frame_count": frame_count,
+            "actual_res": actual_resolution,
+            "bitrate_mbps": bitrate_mbps,
+        }
+
         if not is_image:
             fps = video_stream.get("r_frame_rate")
             if fps != self._config.target_fps:
                 findings.append(self._finding(
                     passed=False, severity="error",
                     message=f"Framerate '{fps}' does not match target '{self._config.target_fps}'.",
-                    details={"fps": fps, "target_fps": self._config.target_fps, "duration": duration, "actual_res": actual_resolution},
+                    details={"fps": fps, "target_fps": self._config.target_fps, **base_details},
                 ))
             else:
                 findings.append(self._finding(
                     passed=True, severity="info",
                     message=f"Framerate '{fps}' matches target.",
-                    details={"fps": fps, "duration": duration, "actual_res": actual_resolution},
+                    details={"fps": fps, **base_details},
+                ))
+
+            if bitrate_mbps is not None:
+                findings.append(self._finding(
+                    passed=True, severity="info",
+                    message=f"Bitrate: {bitrate_mbps} Mbps.",
+                    details={"bitrate_mbps": bitrate_mbps},
                 ))
 
             if not audio_stream:
                 findings.append(self._finding(
                     passed=True, severity="warning",
                     message="No audio stream found.",
-                    details={"duration": duration, "actual_res": actual_resolution},
+                    details=base_details,
                 ))
         else:
             findings.append(self._finding(
                 passed=True, severity="info",
                 message="Image file; framerate and audio checks skipped.",
-                details={"duration": duration, "actual_res": actual_resolution},
+                details=base_details,
             ))
 
         return findings

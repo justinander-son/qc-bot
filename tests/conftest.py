@@ -39,8 +39,6 @@ def mock_config(tmp_path):
             black_picture_threshold=0.98,
             freeze_sensitivity_duration=0.03,
             freeze_noise_floor="-60dB",
-            loudness_target_lufs=-23.0,
-            loudness_tolerance_lu=1.0,
         ),
     )
 

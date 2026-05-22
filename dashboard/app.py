@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 import shutil
 import sys
@@ -7,6 +8,11 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s  %(name)s  %(levelname)s  %(message)s",
+)
 
 # Ensure project root is on sys.path when launched via `streamlit run dashboard/app.py`
 _ROOT = Path(__file__).parent.parent
@@ -16,7 +22,7 @@ if str(_ROOT) not in sys.path:
 import streamlit as st
 from sqlalchemy import select
 
-from core.database import Check, Result, get_session
+from core.database import Check, Result, Run, delete_run, get_runs, get_latest_results_for_run, get_session
 from core.models import JobSummary
 
 st.set_page_config(
@@ -124,11 +130,25 @@ st.markdown("""
         color: #888888 !important;
         font-size: 0.8rem !important;
     }
+
+    /* Compact View / Delete buttons inside the Run History expander */
+    div[data-testid="stExpander"] div.stButton > button {
+        padding: 2px 10px !important;
+        font-size: 0.7rem !important;
+        line-height: 1.4 !important;
+        min-height: 0 !important;
+    }
 </style>
 """, unsafe_allow_html=True)
 
-# Thread-safe lock for progress writes from the background pipeline thread.
-_progress_lock = threading.Lock()
+# Shared-state key stored in session_state.
+# A single mutable dict is used so the background thread can mutate it in-place
+# without relying on Streamlit's contextvars routing (which breaks for non-main threads).
+_PIPELINE_STATE_KEY = "pipeline_state"
+
+
+def _make_pipeline_state() -> dict:
+    return {"running": False, "progress": (0, 0), "error": None, "summary": None}
 
 
 def _get_db_url() -> str:
@@ -140,34 +160,56 @@ def _get_db_url() -> str:
     return f"sqlite:///{_ROOT / 'qc.db'}"
 
 
-def load_results() -> list[dict]:
-    """Load all results from SQLite as a list of dicts for the dataframe."""
+def load_runs() -> list[dict]:
     db_url = _get_db_url()
     db_path_str = db_url.removeprefix("sqlite:///")
     if not Path(db_path_str).exists():
         return []
-    rows = []
     try:
         with get_session(db_url) as session:
-            results = session.execute(
-                select(Result).order_by(Result.checked_at.desc())
-            ).scalars().all()
-            for r in results:
+            runs = get_runs(session)
+            result = []
+            for r in runs:
+                result.append({
+                    "id": r.id,
+                    "project": r.project,
+                    "started_at": r.started_at,
+                    "completed_at": r.completed_at,
+                    "total": r.total,
+                    "passed": r.passed,
+                    "failed": r.failed,
+                    "skipped": r.skipped,
+                    "errors": r.errors,
+                })
+            return result
+    except Exception:
+        return []
+
+
+def load_results_for_run(run_id: str) -> list[dict]:
+    db_url = _get_db_url()
+    try:
+        with get_session(db_url) as session:
+            pairs = get_latest_results_for_run(session, run_id)
+            rows = []
+            for r, attempt_count in pairs:
                 rows.append({
                     "status": r.status.upper(),
                     "filename": r.filename,
                     "shot": r.meta.get("shot", "") if r.meta else "",
                     "uv_area": r.meta.get("uv_area", "") if r.meta else "",
-                    "duration": r.meta.get("duration", "") if r.meta else "",
+                    "frame_count": r.meta.get("frame_count", "") if r.meta else "",
                     "actual_res": r.meta.get("actual_res", "") if r.meta else "",
+                    "bitrate_mbps": r.meta.get("bitrate_mbps", "") if r.meta else "",
                     "checked_on": r.checked_at.strftime("%Y-%m-%d %H:%M:%S") if r.checked_at else "",
+                    "attempts": attempt_count,
                     "rel_path": r.rel_path,
                     "airtable_synced": r.airtable_synced,
                     "_id": r.id,
                 })
+            return rows
     except Exception:
         return []
-    return rows
 
 
 def _load_checks_for_result(result_id: str) -> list[dict]:
@@ -192,11 +234,10 @@ def _load_checks_for_result(result_id: str) -> list[dict]:
 
 
 def _get_routing_path(filename: str) -> Optional[Path]:
-    """Derive destination path under approved_dir using shot-folder conventions."""
     try:
         from core.config import load_config
-        cfg = load_config()
         import re
+        cfg = load_config()
         m = re.match(cfg.filename_regex, filename)
         if not m:
             return None
@@ -212,7 +253,6 @@ def _get_routing_path(filename: str) -> Optional[Path]:
 
 
 def override_file(result_id: str, filename: str) -> tuple[bool, str]:
-    """Set status to 'overridden' in SQLite and copy file to approved dir."""
     db_url = _get_db_url()
     try:
         from core.config import load_config
@@ -227,12 +267,32 @@ def override_file(result_id: str, filename: str) -> tuple[bool, str]:
             dest_path.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(source_path, dest_path)
 
+        airtable_record_id = None
+        failure_messages: list[str] = []
+
         with get_session(db_url) as session:
             result = session.execute(
                 select(Result).where(Result.id == result_id)
             ).scalar_one_or_none()
             if result:
+                airtable_record_id = result.airtable_record_id
+                failure_messages = [
+                    c.message for c in result.checks if not c.passed and c.severity == "error"
+                ]
                 result.status = "overridden"
+                result.airtable_synced = False
+
+        if airtable_record_id and cfg.airtable:
+            from integrations.airtable import AirtableIntegration
+            ai = AirtableIntegration(cfg.airtable, db_url=db_url)
+            synced = ai.write_override(airtable_record_id, failure_messages, cfg.pipeline_version)
+            if synced:
+                with get_session(db_url) as session:
+                    r = session.execute(
+                        select(Result).where(Result.id == result_id)
+                    ).scalar_one_or_none()
+                    if r:
+                        r.airtable_synced = True
 
         return True, f"Overridden and routed to {dest_path.parent.relative_to(cfg.approved_dir) if dest_path else 'N/A'}"
     except Exception as e:
@@ -240,7 +300,6 @@ def override_file(result_id: str, filename: str) -> tuple[bool, str]:
 
 
 def unroute_file(result_id: str, filename: str) -> tuple[bool, str]:
-    """Remove from approved dir and set status back to 'fail'."""
     db_url = _get_db_url()
     try:
         dest_path = _get_routing_path(filename)
@@ -259,37 +318,35 @@ def unroute_file(result_id: str, filename: str) -> tuple[bool, str]:
         return False, str(e)
 
 
-def _pipeline_worker(project: Optional[str]) -> None:
-    """Run in a daemon thread. Updates session_state and never propagates exceptions."""
+def _pipeline_worker(project: Optional[str], state: dict, retry_run_id: Optional[str] = None) -> None:
+    """Run in a daemon thread. Mutates *state* dict in-place — never touches st.session_state."""
     from core.pipeline import run_pipeline
 
     def _update_progress(completed: int, total: int) -> None:
-        with _progress_lock:
-            st.session_state.pipeline_progress = (completed, total)
+        state["progress"] = (completed, total)
 
     try:
-        summary = run_pipeline(project=project, progress_callback=_update_progress)
-        with _progress_lock:
-            st.session_state.pipeline_summary = summary
+        summary = run_pipeline(
+            project=project,
+            progress_callback=_update_progress,
+            retry_run_id=retry_run_id,
+        )
+        state["summary"] = summary
+        state["error"] = None
     except Exception as e:
-        with _progress_lock:
-            st.session_state.pipeline_error = str(e)
+        state["error"] = str(e)
+        state["summary"] = None
     finally:
-        with _progress_lock:
-            st.session_state.pipeline_running = False
+        state["running"] = False
 
 
 def _init_session_state() -> None:
-    defaults = {
-        "pipeline_running": False,
-        "pipeline_progress": (0, 0),
-        "pipeline_error": None,
-        "pipeline_summary": None,
-        "confirm_reset": False,
-    }
-    for key, val in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = val
+    if _PIPELINE_STATE_KEY not in st.session_state:
+        st.session_state[_PIPELINE_STATE_KEY] = _make_pipeline_state()
+    if "confirm_reset" not in st.session_state:
+        st.session_state.confirm_reset = False
+    if "selected_run_id" not in st.session_state:
+        st.session_state.selected_run_id = None
 
 
 def main() -> None:
@@ -297,9 +354,62 @@ def main() -> None:
 
     st.title("QC Dashboard")
 
-    results = load_results()
+    # ── RUN SELECTOR ──────────────────────────────────────────────────────────
+    runs = load_runs()
 
-    # --- STATS BAR ---
+    with st.expander("Run History", expanded=False):
+        if not runs:
+            st.markdown(
+                "<p style='color:#888888; text-transform:uppercase; letter-spacing:0.1rem;'>"
+                "No runs recorded yet</p>",
+                unsafe_allow_html=True,
+            )
+        else:
+            for r in runs:
+                col_label, col_view, col_retry, col_delete = st.columns([5, 1, 1, 1])
+                with col_label:
+                    pass_rate = f"{(r['passed'] / r['total'] * 100):.0f}%" if r["total"] > 0 else "—"
+                    is_selected = st.session_state.selected_run_id == r["id"]
+                    style = "color:#FFFFFF; font-weight:bold;" if is_selected else "color:#888888;"
+                    st.markdown(
+                        f"<span style='{style}'>{r['started_at'].strftime('%Y-%m-%d  %H:%M')} &nbsp;&nbsp; "
+                        f"{r['total']} files &nbsp; {r['passed']} passed &nbsp; {r['failed']} failed &nbsp; {pass_rate}</span>",
+                        unsafe_allow_html=True,
+                    )
+                with col_view:
+                    if st.button("View", key=f"view_{r['id']}", use_container_width=True):
+                        st.session_state.selected_run_id = r["id"]
+                        st.rerun()
+                with col_retry:
+                    ps = st.session_state[_PIPELINE_STATE_KEY]
+                    if st.button("Retry", key=f"retry_{r['id']}", use_container_width=True, disabled=ps["running"]):
+                        ps.update({"running": True, "progress": (0, 0), "error": None, "summary": None})
+                        thread = threading.Thread(
+                            target=_pipeline_worker,
+                            args=(None, ps, r["id"]),
+                            daemon=True,
+                        )
+                        thread.start()
+                        st.session_state.selected_run_id = r["id"]
+                        st.rerun()
+                with col_delete:
+                    if st.button("Delete", key=f"del_{r['id']}", type="secondary", use_container_width=True):
+                        db_url = _get_db_url()
+                        with get_session(db_url) as session:
+                            delete_run(session, r["id"])
+                        if st.session_state.selected_run_id == r["id"]:
+                            st.session_state.selected_run_id = None
+                        st.rerun()
+
+    # Auto-select the most recent run if none selected
+    if st.session_state.selected_run_id is None and runs:
+        st.session_state.selected_run_id = runs[0]["id"]
+
+    # Load results for the selected run
+    selected_run_id = st.session_state.selected_run_id
+    results = load_results_for_run(selected_run_id) if selected_run_id else []
+
+    # ── STATS BAR ─────────────────────────────────────────────────────────────
     total = len(results)
     passed = sum(1 for r in results if r["status"] in ("PASS", "OVERRIDDEN"))
     failed = sum(1 for r in results if r["status"] == "FAIL")
@@ -313,64 +423,53 @@ def main() -> None:
 
     st.divider()
 
-    # --- CONTROL PANEL ---
-    col_btn1, col_btn2 = st.columns(2)
+    # ── CONTROL PANEL ─────────────────────────────────────────────────────────
+    ps = st.session_state[_PIPELINE_STATE_KEY]
 
-    with col_btn1:
-        start_disabled = st.session_state.pipeline_running
-        if st.button("Start QC Processing", type="primary", use_container_width=True, disabled=start_disabled):
-            st.session_state.pipeline_running = True
-            st.session_state.pipeline_progress = (0, 0)
-            st.session_state.pipeline_error = None
-            st.session_state.pipeline_summary = None
-            thread = threading.Thread(target=_pipeline_worker, args=(None,), daemon=True)
-            thread.start()
-            st.rerun()
-
-    with col_btn2:
-        if not st.session_state.confirm_reset:
-            if st.button("Reset Database", type="secondary", use_container_width=True):
-                st.session_state.confirm_reset = True
-                st.rerun()
-        else:
-            st.warning("This will permanently delete qc.db. All QC results will be lost.")
-            col_yes, col_no = st.columns(2)
-            with col_yes:
-                if st.button("Confirm Reset", type="primary", use_container_width=True):
-                    db_url = _get_db_url()
-                    db_path = Path(db_url.removeprefix("sqlite:///"))
-                    if db_path.exists():
-                        db_path.unlink()
-                    st.session_state.confirm_reset = False
-                    st.rerun()
-            with col_no:
-                if st.button("Cancel", type="secondary", use_container_width=True):
-                    st.session_state.confirm_reset = False
-                    st.rerun()
-
-    # --- PROGRESS DISPLAY ---
-    if st.session_state.pipeline_running:
-        completed, total_files = st.session_state.pipeline_progress
-        progress_val = (completed / total_files) if total_files > 0 else 0.0
-        st.progress(progress_val, text=f"PROCESSING: {completed}/{total_files} files")
-        with st.spinner("Pipeline running..."):
-            time.sleep(0.5)
+    if st.button(
+        "Start QC Processing",
+        type="primary",
+        use_container_width=True,
+        disabled=ps["running"],
+    ):
+        ps.update({"running": True, "progress": (0, 0), "error": None, "summary": None})
+        thread = threading.Thread(target=_pipeline_worker, args=(None, ps), daemon=True)
+        thread.start()
         st.rerun()
-    elif st.session_state.pipeline_error:
-        st.error(f"Pipeline error: {st.session_state.pipeline_error}")
-    elif st.session_state.pipeline_summary is not None:
-        s: JobSummary = st.session_state.pipeline_summary
-        st.success(
-            f"Pipeline complete — {s.total} files processed: "
-            f"{s.passed} passed, {s.failed} failed, {s.errors} errors"
-        )
+
+    # ── PROGRESS DISPLAY ──────────────────────────────────────────────────────
+    if ps["running"]:
+        completed, total_files = ps["progress"]
+        if total_files == 0:
+            st.progress(0.0, text="Checking for pending records...")
+        else:
+            st.progress(completed / total_files, text=f"PROCESSING: {completed}/{total_files} files")
+        time.sleep(0.5)
+        st.rerun()
+    elif ps["error"]:
+        st.error(f"Pipeline error: {ps['error']}")
+    elif ps["summary"] is not None:
+        s: JobSummary = ps["summary"]
+        if s.total == 0:
+            st.info("Pipeline complete — no pending files found")
+        else:
+            st.success(
+                f"Pipeline complete — {s.total} files processed: "
+                f"{s.passed} passed, {s.failed} failed, {s.errors} errors"
+            )
+            # Auto-switch to the freshly created run
+            fresh_runs = load_runs()
+            if fresh_runs:
+                st.session_state.selected_run_id = fresh_runs[0]["id"]
+            ps["summary"] = None
+            st.rerun()
 
     st.divider()
 
     if not results:
         st.markdown(
             "<p style='color:#888888; text-transform:uppercase; letter-spacing:0.1rem;'>"
-            "Run the QC pipeline above to see results</p>",
+            "Run the QC pipeline to see results</p>",
             unsafe_allow_html=True,
         )
         return
@@ -379,7 +478,7 @@ def main() -> None:
 
     df = pd.DataFrame(results)
 
-    # --- SEARCH & FILTER ---
+    # ── SEARCH & FILTER ───────────────────────────────────────────────────────
     search_query = st.text_input("Search Filename", "")
 
     with st.expander("Filter By", expanded=False):
@@ -405,16 +504,18 @@ def main() -> None:
 
     filtered_df = df[mask].reset_index(drop=True)
 
-    # --- RESULTS TABLE ---
-    display_cols = ["status", "filename", "shot", "uv_area", "actual_res", "duration", "checked_on", "airtable_synced"]
+    # ── RESULTS TABLE ─────────────────────────────────────────────────────────
+    display_cols = ["status", "filename", "shot", "uv_area", "actual_res", "bitrate_mbps", "frame_count", "checked_on", "attempts", "airtable_synced"]
     col_labels = {
         "status": "Status",
         "filename": "Filename",
         "shot": "Shot",
         "uv_area": "UV",
         "actual_res": "Res",
-        "duration": "Duration",
+        "bitrate_mbps": "Bitrate (Mbps)",
+        "frame_count": "Frames",
         "checked_on": "Checked On",
+        "attempts": "Attempts",
         "airtable_synced": "Synced",
     }
     display_df = filtered_df[display_cols].rename(columns=col_labels)
@@ -427,7 +528,7 @@ def main() -> None:
         selection_mode="single-row",
     )
 
-    # --- EXPORT ---
+    # ── EXPORT ────────────────────────────────────────────────────────────────
     with st.expander("Export", expanded=False):
         from core.reporter import to_csv, to_html
 
@@ -455,7 +556,7 @@ def main() -> None:
 
     st.divider()
 
-    # --- DETAIL PANEL ---
+    # ── DETAIL PANEL ──────────────────────────────────────────────────────────
     selected_indices = event.get("selection", {}).get("rows", [])
     if not selected_indices:
         st.markdown(
@@ -488,7 +589,7 @@ def main() -> None:
             f"**STATUS:** <span style='color:{color}; font-weight:bold;'>{current_status.upper()}</span>",
             unsafe_allow_html=True,
         )
-        st.write(f"**DURATION:** {selected_row.get('duration', 'N/A')}s")
+        st.write(f"**FRAMES:** {selected_row.get('frame_count', 'N/A')}")
         st.write(f"**CHECKED:** {selected_row.get('checked_on', 'N/A')}")
         synced = selected_row.get("airtable_synced", False)
         st.write(f"**AIRTABLE SYNCED:** {'Yes' if synced else 'No'}")

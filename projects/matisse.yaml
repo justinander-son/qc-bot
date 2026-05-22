@@ -7,18 +7,22 @@ approved_dir: ${APPROVED_DIR}
 
 # ── Filename convention ───────────────────────────────────────────────────────
 # Capture groups: shot, name, uv_area, res_name, version, frame (opt), ext
-filename_regex: '^(\d{3})_([A-Za-z0-9]+)_(T|All Walls|Brick|Floor|WallA|WallB|WallC|WallD)_(FullRes|HalfRes|QRes)_(v\d{6}[a-z]?)(?:_(\d+))?\.(mp4|jpg|png)$'
+filename_regex: '^(\d{3})_([A-Za-z0-9]+)_(T|AllWalls|Brick|Floor|WallA|WallB|WallC|WallD)_(FullRes|HalfRes|QRes)_(v\d{6}[a-z]?)(?:_(\d+[a-z]?)(?:-5)?)?\.(mp4|mov|jpg|png)$'
 
 # ── Allowed technical specs ───────────────────────────────────────────────────
 allowed_resolutions:
   - "13584x1712"
   - "6792x2260"
   - "13584x4518"
+  - "13584x4519"
+  - "13584x4520"
   - "8192x4320"
   - "2318x1632"
   - "4636x3264"
   - "7972x3424"
   - "5612x3424"
+  - "6792x2259"
+  -
 
 allowed_codecs: [h264, prores, mjpeg, png]
 target_fps: "30/1"
@@ -47,8 +51,10 @@ airtable:
     # Remove this line if the field doesn't exist in your table yet
     # qc_version: "QC Version"
 
-  # Records with this value in qc_status are picked up for processing
-  pending_value: "Pending Review"
+  # Records with any of these values in qc_status are picked up for processing
+  pending_values:
+    - "Pending Review"
+    - "Denied"
 
   # What the pipeline writes back to qc_status for each outcome.
   # Change these to match whatever values your Airtable expects
@@ -56,7 +62,7 @@ airtable:
   status_values:
     pass: "Approved"
     fail: "Denied"
-    error: "In Progress"
+    error: "Denied"
 
 # ── QC sensitivity ────────────────────────────────────────────────────────────
 qc:
@@ -77,9 +83,3 @@ qc:
 
   # Noise floor for freeze detection — frames with noise below this are considered frozen
   freeze_noise_floor: "-60dB"
-
-  # EBU R128 target loudness in LUFS (-23.0 for broadcast, -16.0 for streaming)
-  loudness_target_lufs: -23.0
-
-  # Acceptable deviation from target in LU (±)
-  loudness_tolerance_lu: 1.0

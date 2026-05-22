@@ -44,7 +44,7 @@ def test_airtable_no_api_key_returns_empty(monkeypatch):
             "qc_checked_at": "QC Checked At",
             "qc_version": "QC Version",
         },
-        pending_value="Pending",
+        pending_values=["Pending"],
     )
     ai = AirtableIntegration(cfg)
     assert ai.get_pending_records() == []
@@ -66,7 +66,7 @@ def test_airtable_write_result_no_api_key_returns_false(monkeypatch):
             "qc_checked_at": "QC Checked At",
             "qc_version": "QC Version",
         },
-        pending_value="Pending",
+        pending_values=["Pending"],
     )
     ai = AirtableIntegration(cfg)
     result = QCResult(
@@ -74,6 +74,7 @@ def test_airtable_write_result_no_api_key_returns_false(monkeypatch):
         rel_path="test.mp4",
         file_path=Path("test.mp4"),
         airtable_record_id="recTEST",
+        run_id=None,
         status="pass",
         findings=[],
         duration="2.0",

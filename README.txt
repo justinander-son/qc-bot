@@ -1,9 +1,10 @@
-🎬 DAILIES QC PIPELINE - SETUP & USAGE GUIDE
+DAILIES QC PIPELINE - SETUP & USAGE GUIDE
 ==========================================
 
-This pipeline is a modular, high-performance tool for validating and organizing 
-animation/VFX dailies. It uses FFmpeg for technical analysis and Streamlit for 
-a web-based management dashboard.
+Modular QC pipeline for animation/VFX dailies. Uses FFmpeg for technical
+analysis and Streamlit for a web-based management dashboard. Airtable records
+drive what gets processed — set a record to a pending status, run the pipeline,
+results write back automatically.
 
 ---
 1. INSTALLATION
@@ -18,46 +19,83 @@ a web-based management dashboard.
    pip install -r requirements.txt
 
 ---
-2. PORTING TO A NEW PROJECT
+2. ENVIRONMENT SETUP
 ---
-Everything required to customize the tool lives in 'config.py'. 
+Copy .env.example to .env and fill in the required values:
 
-To move to a new show:
-1. Update SOURCE_DIR and APPROVED_DIR paths.
-2. Update FILENAME_REGEX to match your show's naming convention.
-3. Edit parse_metadata() to map your regex groups to meaningful keys.
-4. Edit get_routing_path() to define your desired folder structure.
-5. Update ALLOWED_RESOLUTIONS and TARGET_FPS to match show delivery specs.
+   QC_PROJECT=matisse             # matches a file in projects/<name>.yaml
+   SOURCE_DIR=/path/to/dailies    # root directory where media files live
+   APPROVED_DIR=/path/to/approved # destination for passed files
+   AIRTABLE_API_KEY=patXXX...     # Airtable personal access token
+   AIRTABLE_BASE_ID=appXXX...     # your Airtable base ID
+   AIRTABLE_TABLE_ID=tblXXX...    # your Airtable table ID
 
 ---
-3. USAGE
+3. PORTING TO A NEW SHOW
+---
+1. Copy projects/matisse.yaml to projects/<show>.yaml.
+2. Update filename_regex to match the new show's naming convention.
+3. Update allowed_resolutions, allowed_codecs, and target_fps.
+4. Update the airtable.fields block to match your Airtable column names exactly.
+5. Update airtable.pending_values and status_values to match your workflow.
+6. Set QC_PROJECT=<show> in .env.
+
+---
+4. USAGE
 ---
 A) THE DASHBOARD (Recommended)
-   Run the following command to launch the web interface:
-   ./.venv/bin/streamlit run dashboard.py
-   
+   streamlit run dashboard/app.py
+
    From here you can:
-   - Start the QC Engine.
-   - View detailed PASS/FAIL logs.
-   - Manually OVERRIDE failures and route files.
-   - View real-time technical metadata.
+   - Run the QC pipeline against all pending Airtable records.
+   - View detailed PASS/FAIL logs per file and per checker.
+   - Manually override failures and route files.
+   - Browse run history and technical metadata.
 
-B) THE ENGINE (Terminal Only)
-   Run the following command to process files without the dashboard:
-   ./.venv/bin/python main.py
-
----
-4. PROJECT STRUCTURE
----
-- config.py      : THE SINGLE SOURCE OF TRUTH. Logic, paths, and specs.
-- main.py        : The parallel processing engine.
-- dashboard.py   : The Streamlit web interface.
-- database.py    : Thread-safe JSON database management.
-- checkers/      : Individual QC logic (Metadata and FFmpeg content checks).
-- requirements.txt: List of required Python packages.
+B) PIPELINE TRIGGER (Airtable-driven)
+   The pipeline picks up any record where the QC Status field matches a value
+   in pending_values (e.g. "Pending Review"). It locates the file on disk using
+   the file_path field, runs all checkers, then writes the result back to the
+   same record.
 
 ---
-5. DATABASE RESET
+5. PROJECT STRUCTURE
 ---
-If you need to re-analyze all files from scratch, click 'Reset Database' in 
-the dashboard or delete 'qc_database.json' manually.
+core/
+  config.py      — Loads .env + projects/<show>.yaml into typed config objects
+  database.py    — SQLite schema and session management (SQLAlchemy)
+  pipeline.py    — Orchestration: fetch records → locate files → run checkers → write back
+  models.py      — Shared dataclasses (QCResult, JobSummary)
+  registry.py    — Checker plugin registry
+
+checkers/
+  base.py        — BaseChecker ABC all checkers implement
+  metadata.py    — Filename regex + FFprobe technical metadata
+  content.py     — Black frame and frozen frame detection (FFmpeg)
+  loudness.py    — EBU R128 loudness (FFmpeg ebur128 filter)
+  colorspace.py  — HDR / color space validation
+  integrity.py   — File size and PTS discontinuity checks
+
+integrations/
+  airtable.py    — Airtable API client (get pending records, write results)
+  notifications.py — Optional Slack/email job summaries
+
+dashboard/
+  app.py         — Streamlit web interface
+
+projects/
+  matisse.yaml   — Per-show config: field names, specs, Airtable IDs
+
+tests/           — Full pytest suite, no external services required
+
+---
+6. DATABASE RESET
+---
+The local SQLite audit database (qc.db) mirrors every result before it is
+written to Airtable. To re-process files from scratch:
+- Delete qc.db, OR
+- Use the "Reset Database" button in the dashboard.
+
+Airtable remains the authoritative record store. Resetting the local DB does
+not change Airtable records — set those back to a pending_value manually if
+you want the pipeline to re-run them.

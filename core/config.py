@@ -17,7 +17,7 @@ class AirtableConfig:
     base_id: str
     table_id: str
     fields: dict[str, str]
-    pending_value: str
+    pending_values: list[str]
     status_values: dict[str, str] = field(default_factory=lambda: {
         "pass": "pass",
         "fail": "fail",
@@ -33,8 +33,6 @@ class QCParams:
     black_picture_threshold: float
     freeze_sensitivity_duration: float
     freeze_noise_floor: str
-    loudness_target_lufs: float
-    loudness_tolerance_lu: float
 
 
 @dataclass
@@ -92,13 +90,21 @@ def _read_pipeline_version() -> str:
     return "2.0.0"
 
 
+def _parse_pending_values(raw: dict) -> list[str]:
+    """Accept either pending_values (list) or legacy pending_value (str)."""
+    if "pending_values" in raw:
+        val = raw["pending_values"]
+        return list(val) if isinstance(val, (list, tuple)) else [str(val)]
+    return [str(raw.get("pending_value", "Pending"))]
+
+
 def _parse_airtable(raw: dict) -> AirtableConfig:
     default_status = {"pass": "pass", "fail": "fail", "error": "error"}
     return AirtableConfig(
         base_id=raw["base_id"],
         table_id=raw["table_id"],
         fields=raw.get("fields", {}),
-        pending_value=raw.get("pending_value", "Pending"),
+        pending_values=_parse_pending_values(raw),
         status_values={**default_status, **raw.get("status_values", {})},
     )
 
@@ -111,8 +117,6 @@ def _parse_qc(raw: dict) -> QCParams:
         black_picture_threshold=float(raw["black_picture_threshold"]),
         freeze_sensitivity_duration=float(raw["freeze_sensitivity_duration"]),
         freeze_noise_floor=str(raw["freeze_noise_floor"]),
-        loudness_target_lufs=float(raw["loudness_target_lufs"]),
-        loudness_tolerance_lu=float(raw["loudness_tolerance_lu"]),
     )
 
 

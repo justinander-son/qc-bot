@@ -14,6 +14,7 @@ class QCResult:
     rel_path: str
     file_path: Path
     airtable_record_id: Optional[str]
+    run_id: Optional[str]
     status: str                        # "pass" | "fail" | "error" | "skipped"
     findings: list[CheckFinding]
     duration: str                      # file duration in seconds as string
